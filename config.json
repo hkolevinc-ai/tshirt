@@ -1,0 +1,14 @@
+{
+  "rows_per_file": 2000,
+  "max_variants_per_product": 10000,
+  "default_weight_g": null,
+  "default_package_cm": {"length": null, "width": null, "height": null},
+  "country_of_origin": null,
+  "manufacturer": null,
+  "eu_responsible_person": null,
+  "product_identification": null,
+  "individually_packed": null,
+  "shipping_template": "MS ONLINE",
+  "handling_time": null,
+  "product_overrides": {}
+}
