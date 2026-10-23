@@ -1,0 +1,45 @@
+name: TShirt24 to Temu
+on:
+  workflow_dispatch:
+    inputs:
+      refresh:
+        description: Refresh product data from the website
+        type: boolean
+        default: true
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - uses: actions/cache@v4
+        with:
+          path: cache
+          key: tshirt24-cache-${{ github.run_id }}
+          restore-keys: tshirt24-cache-
+      - name: Validate transformations
+        run: python -m unittest discover -s tests -v
+      - name: Scan and fill template
+        env:
+          REFRESH: ${{ inputs.refresh }}
+        run: |
+          if [ "$REFRESH" = "true" ]; then
+            python -u scraper.py --workers 3 --refresh
+          else
+            python -u scraper.py --workers 3
+          fi
+      - name: Download results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tshirt24-temu-results
+          path: output/
+          if-no-files-found: error
+          retention-days: 30
