@@ -1,12 +1,13 @@
 import unittest
 import tempfile
 import zipfile
+import json
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
 from scraper import (clean_description, original_image, composition,
                      size_measurements, extract_page, variants, classify,
-                     write_template, QN)
+                     write_template, QN, color_name, read_export)
 
 
 class DataRules(unittest.TestCase):
@@ -26,6 +27,14 @@ class DataRules(unittest.TestCase):
     def test_composition_is_not_invented(self):
         self.assertEqual(composition('<p>80% памук, 20% полиестер</p>'),{'Cotton':80.0,'Polyester':20.0})
         self.assertEqual(composition('80% памук'),{})
+
+    def test_organic_cotton_and_advertising_percent(self):
+        self.assertEqual(composition('Състав: 100% органичен памук'),{'Cotton':100.0})
+        self.assertEqual(composition('100% Най-добрата майка'),{})
+
+    def test_color_without_a_live_color_selector(self):
+        self.assertEqual(color_name(None,'Мъжка бяла тениска'),'White')
+        self.assertEqual(color_name(None,'Панталони в оранжево'),'Orange')
 
     def test_flat_width_doubles_for_chest_only(self):
         source='<table><tr><td>МЪЖКА БЛУЗА</td><td>S</td><td>M</td></tr><tr><td>Широчина</td><td>51</td><td>56</td></tr><tr><td>Височина</td><td>67</td><td>70</td></tr></table>'
@@ -47,6 +56,41 @@ class DataRules(unittest.TestCase):
         self.assertIsNone(classify({'name(bg)':'Комплект тениски за мама, татко и дете'})[0])
         self.assertEqual(classify({'name(bg)':'Мъжка бяла тениска'})[0],'30469')
         self.assertEqual(classify({'name(bg)':'Дамски суитчър с качулка'})[0],'29065')
+
+    def test_unsupported_garments_do_not_become_tshirts(self):
+        for title in ['Мъжко вталено яке','Дамско леко яке без ръкав','Къси спортни панталони в черно']:
+            self.assertIsNone(classify({'name(bg)':title})[0])
+
+    def test_optional_gift_bag_does_not_block_or_multiply_sizes(self):
+        size={'name':'Мъжки размер','choices':[{'id':'1','label':'S'},{'id':'2','label':'M'}],'required':True,'custom':False}
+        gift={'name':'Добави подаръчна чанта от 100% памук','choices':[{'id':'3','label':'Да'}],'required':False,'custom':True}
+        result=list(variants({'export_options':[{}]},{'groups':[size,gift]},100))
+        self.assertEqual(len(result),2)
+        self.assertTrue(all(len(combo)==1 for combo in result))
+        gift['required']=True
+        with self.assertRaises(ValueError):
+            list(variants({'export_options':[{}]},{'groups':[size,gift]},100))
+
+    def test_imported_prices_equal_raw_column_O_for_all_products(self):
+        root=Path(__file__).resolve().parents[1]
+        config=json.loads((root/'config.json').read_text(encoding='utf-8'))
+        export=root/'input'/config['export_file']
+        products=read_export(export)
+        # Independent numeric OOXML check avoids accepting accidental VAT
+        # conversion or a shifted column in the modified source layout.
+        with zipfile.ZipFile(export) as z:
+            sheet=ET.fromstring(z.read('xl/worksheets/sheet1.xml'))
+            checked=0
+            for row in sheet.find(QN('sheetData')):
+                if int(row.attrib['r'])==1:continue
+                cells={c.attrib['r'].rstrip('0123456789'):c for c in row}
+                if 'A' not in cells or cells['A'].find(QN('v')) is None:continue
+                pid=str(int(cells['A'].find(QN('v')).text))
+                value=float(cells['O'].find(QN('v')).text)
+                self.assertEqual(products[pid]['price_o'],value)
+                checked+=1
+        self.assertEqual(checked,len(products))
+        self.assertGreater(checked,0)
 
     def test_output_serializer_preserves_reserved_rows_and_other_parts(self):
         # A minimal OOXML ZIP fixture, rather than a user workbook.

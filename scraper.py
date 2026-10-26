@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TShirt24 -> the supplied Temu template. Python 3.11+, no browser required.
+"""TShirt24 -> the supplied Temu template, v1.1. Python 3.11+, no browser required.
 
 The price authority is Products!O, never Specials, VAT-excluded columns or HTML.
 XLSX input is read only. Output keeps the original OOXML package and replaces
@@ -12,6 +12,7 @@ import concurrent.futures as futures
 import copy
 import csv
 import hashlib
+import http.client
 import itertools
 import json
 import logging
@@ -37,6 +38,7 @@ QN = lambda name: f"{{{NS}}}{name}"
 BAD = re.compile(r"достав|куриер|еконт|спиди|speedy|econt|наложен платеж|плащан|връщан|върне|замяна|рекламаци|гаранци|работни дни|безплатн|отстъпк|промоци|поръч|телефон|\+359|https?://|www\.|shipping|delivery|warranty|returns|payment|цената|цена[ :]|евро|\bлв\b|\bEUR\b", re.I)
 SET_RE = re.compile(r"комплект|за двойки|семейн|семейство|мама.{0,25}татко|родители и дете", re.I)
 COLORS = {"бял":"White", "бялo":"White", "бяло":"White", "черен":"Black", "черна":"Black", "черно":"Black", "сив":"Grey", "сива":"Grey", "сиво":"Grey", "червен":"Red", "червена":"Red", "червено":"Red", "розов":"Pink", "розова":"Pink", "син":"Blue", "синя":"Blue", "синьо":"Blue", "зелен":"Green", "зелена":"Green", "жълт":"Yellow", "жълта":"Yellow", "лилав":"Purple", "лилава":"Purple", "бордо":"Burgundy", "оранжев":"Orange", "тъмно-син":"Navy Blue", "тъмносин":"Navy Blue", "тъмно син":"Navy Blue", "тъмно-синя":"Navy Blue", "тъмно-синьо":"Navy Blue"}
+COLORS.update({"бяла":"White", "розово":"Pink", "зелено":"Green", "жълто":"Yellow", "лилаво":"Purple", "оранжева":"Orange", "оранжево":"Orange", "тъмно синя":"Navy Blue", "тъмно синьо":"Navy Blue", "тъмносиня":"Navy Blue", "тъмносиньо":"Navy Blue"})
 FIBERS = {"памук":"Cotton", "полиестер":"Polyester", "еластан":"Elastane", "вискоза":"Viscose", "полиамид":"Polyamide", "лен":"Linen", "акрил":"Acrylic", "вълна":"Wool", "cotton":"Cotton", "polyester":"Polyester", "elastane":"Elastane", "viscose":"Viscose"}
 
 
@@ -96,7 +98,7 @@ def sheet_rows(wb, name):
 def read_export(path):
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     rows = sheet_rows(wb, "Products")
-    if rows[0][14] != "price":
+    if len(rows[0]) < 15 or norm(rows[0][14]).casefold() != "price":
         raise ValueError("Products!O1 must be price. Refusing another price column.")
     products = {}
     for excel_row, row in enumerate(rows[1:], 2):
@@ -266,7 +268,7 @@ class Fetcher:
                     temp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
                     temp.replace(path)
                     return data
-                except (ValueError, OSError, urllib.error.URLError, json.JSONDecodeError) as e:
+                except (ValueError, OSError, urllib.error.URLError, json.JSONDecodeError, http.client.IncompleteRead) as e:
                     last = e
                     if isinstance(e, urllib.error.HTTPError) and e.code == 404:
                         break
@@ -281,6 +283,8 @@ def classify(p, group_name="", category_override=None):
     text = name + " " + norm(p.get("tags(bg)")).lower()
     if SET_RE.search(name):
         return None, "Mixed/couple/family set: needs a suitable set category or individual item prices"
+    if re.search(r"панталон|шорт|бански|яке|жилетк|рокл|клин|престилк|чорап|шапк", name):
+        return None, "Garment type is not covered by the supplied template; add its category instead of using T-Shirts"
     hood = bool(re.search(r"суи[тчш]+[ъеа]?р|качулк|hoodie", text))
     sweatshirt = bool(re.search(r"блуз|sweatshirt", name))
     polo = "поло" in text
@@ -315,7 +319,7 @@ def composition(markup):
     text = plain(markup).lower()
     found = {}
     for bg, en in FIBERS.items():
-        for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*%\s*" + bg, text):
+        for m in re.finditer(r"(\d+(?:[.,]\d+)?)\s*%\s*(?:(?:органичен|органически|пениран|organic|combed)\s+)*" + re.escape(bg) + r"\b", text):
             found[en] = float(m[1].replace(",", "."))
     if found and abs(sum(found.values()) - 100) > 0.1:
         return {}  # Do not invent remaining fibers.
@@ -350,7 +354,9 @@ def size_measurements(markup, size):
 
 
 def variants(p, live, max_variants):
-    groups = live["groups"]
+    # Gift wrapping is an optional upsell, not a garment variation. Never add
+    # its price or multiply clothing rows by a choice of gift packaging.
+    groups = [g for g in live["groups"] if not (not g["required"] and re.search(r"подаръчн.*(?:чант|опаков)|gift\s*(?:bag|wrap)",g["name"],re.I))]
     if p["export_options"] and not groups:
         raise ValueError("Export has options but no live options were found")
     if any(g["custom"] for g in groups):
@@ -595,6 +601,7 @@ def main():
     ap.add_argument("--input",default="input")
     ap.add_argument("--output",default="output")
     ap.add_argument("--config",default="config.json")
+    ap.add_argument("--export",help="Explicit export filename inside --input; otherwise use config export_file")
     ap.add_argument("--workers",type=int,default=3)
     ap.add_argument("--limit",type=int,default=0)
     ap.add_argument("--ids",help="Comma-separated product IDs for a controlled check")
@@ -614,10 +621,24 @@ def main():
             for old in out.glob(pattern):
                 old.unlink()
     inputs = list(Path(args.input).glob("*.xlsx"))
-    template = next((p for p in inputs if p.name.upper().startswith("TEMU")),None)
-    export = next((p for p in inputs if p.name.lower().startswith("export_24tshirt")),None)
-    if not template or not export:
-        ap.error("Put the TEMU template and export_24tshirt.xlsx in input/")
+    templates = [p for p in inputs if p.name.upper().startswith("TEMU")]
+    if len(templates) != 1:
+        ap.error("input/ must contain exactly one TEMU template")
+    template = templates[0]
+    export_name = args.export or config.get("export_file")
+    if export_name:
+        if Path(export_name).name != export_name:
+            ap.error("export_file must be a filename inside input/")
+        export = Path(args.input)/export_name
+        if not export.is_file():
+            ap.error(f"Configured price source is missing: {export}; no fallback to an old export")
+    else:
+        exports = [p for p in inputs if p.name.lower().startswith("export_24tshirt")]
+        if len(exports) != 1:
+            ap.error("Set export_file in config.json when there is not exactly one export")
+        export = exports[0]
+    export_sha256 = hashlib.sha256(export.read_bytes()).hexdigest()
+    LOG.info("Price source: %s, column O (PRICE), SHA256 %s",export,export_sha256)
     schema = Template(template)
     products = read_export(export)
     selected = list(products.values())
@@ -678,7 +699,7 @@ def main():
     csv_report(out/"excluded.csv",excluded)
     csv_report(out/"price_audit.csv",[{k:r[k] for k in ["product_id","sku","price_o","source_excel_row","category","options"]} for r in rows])
     (out/"records.json").write_text(json.dumps(rows,ensure_ascii=False),encoding="utf-8")
-    summary = {"export_products":len(products),"selected_products":len(selected),"verified_products_with_rows":len({r["product_id"] for r in rows}),"variation_rows":len(rows),"upload_ready_rows":len(ready),"draft_rows":len(draft),"review_products":len({r["product_id"] for r in review}),"excluded_products":len(excluded),"dry_run":args.dry_run,"price_rule":"exact Products!O; no VAT change, no Specials, no option surcharges","categories":dict(Counter(r["category"] for r in rows))}
+    summary = {"scraper_version":"1.1","price_source_file":export.name,"price_source_sha256":export_sha256,"price_source_column":"O","export_products":len(products),"selected_products":len(selected),"verified_products_with_rows":len({r["product_id"] for r in rows}),"variation_rows":len(rows),"upload_ready_rows":len(ready),"draft_rows":len(draft),"review_products":len({r["product_id"] for r in review}),"excluded_products":len(excluded),"dry_run":args.dry_run,"price_rule":"exact Products!O; no VAT change, no Specials, no option surcharges","categories":dict(Counter(r["category"] for r in rows))}
     accounted = {r["product_id"] for r in rows}|{r["product_id"] for r in review}|{r["product_id"] for r in excluded}
     if accounted != {p["id"] for p in selected}:
         raise ValueError("A selected product is missing from output/review/excluded")

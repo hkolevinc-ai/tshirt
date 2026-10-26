@@ -1,4 +1,5 @@
 {
+  "export_file": "export_24tshirt_latest.xlsx",
   "rows_per_file": 2000,
   "max_variants_per_product": 10000,
   "default_weight_g": null,
